@@ -1,0 +1,13 @@
+torch --index-url https://download.pytorch.org/whl/cu118
+peft
+tensorboardX
+transformers==4.30.2
+lightning==2.0.5
+Pillow
+numpy
+gradio
+sentencepiece
+accelerate
+bitsandbytes
+scipy
+deepspeed
