@@ -12,6 +12,50 @@ from transformers import SwinModel
 from lightning_tools.optim import config_optimizer
 from peft import get_peft_model, LoraConfig, TaskType
 import pdb
+import re
+
+
+class Accuracy(object):
+    # Strict accuracy compares text in a strict manner.
+    def __init__(self) -> None:
+        super().__init__()
+        self._correct = 0
+        self._total = 0
+
+    # from https://github.com/cuhksz-nlp/R2Gen/blob/main/modules/tokenizers.py
+    def clean(self, report):
+        # Clean answers before comparing them
+        report_cleaner = lambda t: t.replace('\n', ' ').replace('__', '_').replace('__', '_').replace('__', '_') \
+            .replace('__', '_').replace('__', '_').replace('__', '_').replace('__', '_').replace('  ', ' ') \
+            .replace('  ', ' ').replace('  ', ' ').replace('  ', ' ').replace('  ', ' ').replace('  ', ' ') \
+            .replace('..', '.').replace('..', '.').replace('..', '.').replace('..', '.').replace('..', '.') \
+            .replace('..', '.').replace('..', '.').replace('..', '.').replace('1. ', '').replace('. 2. ', '. ') \
+            .replace('. 3. ', '. ').replace('. 4. ', '. ').replace('. 5. ', '. ').replace(' 2. ', '. ') \
+            .replace(' 3. ', '. ').replace(' 4. ', '. ').replace(' 5. ', '. ').replace(':', ' :') \
+            .strip().lower().split('. ')
+        sent_cleaner = lambda t: re.sub('[.,?;*!%^&_+()\[\]{}]', '', t.replace('"', '').replace('/', '')
+                            .replace('\\', '').replace("'", '').strip().lower())
+        tokens = [sent_cleaner(sent) for sent in report_cleaner(report) if sent_cleaner(sent) != []]
+        report = ' . '.join(tokens) + ' .' 
+        return report
+
+    def compute_score(self, ref, hypo):
+        for k, v in ref.items():
+            assert isinstance(v, list) and len(v) == 1 # sanity check
+            assert isinstance(hypo[k], list) and len(hypo[k]) == 1 # sanity check
+            true = v[0]
+            pred = hypo[k][0]
+            # clean up sentences
+            true = self.clean(true)
+            pred = self.clean(pred)
+            if true == pred:
+                self._correct += 1
+            self._total += 1
+        accuracy = self._correct / self._total
+        # just in case, clear up the variables to avoid accumulation if same object is used.
+        self._correct = 0
+        self._total = 0
+        return accuracy, 0
 
 
 
@@ -69,11 +113,18 @@ class R2GenGPT(pl.LightningModule):
             self.llama_model = get_peft_model(self.llama_model, peft_config)
             self.llama_model.print_trainable_parameters()
             print('Loading LLAMA LoRA Done')         
-        else:
+        elif args.llm_freeze:
             self.embed_tokens = self.llama_model.get_input_embeddings()
             for name, param in self.llama_model.named_parameters():
                 param.requires_grad = False
-            print('Loading LLAMA Done')
+            print('Loading Frozen LLAMA Done')
+        else:
+            for param in self.llama_model.parameters():
+                # Check if parameter dtype is  Half (float16)
+                if param.dtype == torch.float16:
+                    param.data = param.data.to(torch.float32)
+            self.embed_tokens = self.llama_model.get_input_embeddings()
+            print('Loading Unfrozen LLAMA Done')
 
         self.llama_proj = nn.Linear(self.visual_encoder.num_features, self.llama_model.config.hidden_size)
         self.layer_norm = nn.LayerNorm(self.llama_model.config.hidden_size)
@@ -99,7 +150,8 @@ class R2GenGPT(pl.LightningModule):
             (Bleu(4), ["Bleu_1", "Bleu_2", "Bleu_3", "Bleu_4"]),
             (Rouge(), "ROUGE_L"),
             #(Meteor(), "METEOR"),
-            (Cider(), "CIDEr")
+            (Cider(), "CIDEr"),
+            (Accuracy(), "Accuracy")
         ]
         final_scores = {}
         for scorer, method in scorers:
@@ -143,15 +195,35 @@ class R2GenGPT(pl.LightningModule):
         return wrapped_img_embeds, wrapped_atts_img
 
 
+    def prompt_wrap_vqa(self, img_embeds, atts_img, question):
+        # In case question is present, use it instead of self.prompt
+        #prompt=f'Human: <Img><ImageHere></Img> {question} \nAssistant:'
+        #prompt=f'You are a helpful medical assistant that answers questions about images. Here is a question: {question} <Img><ImageHere></Img> Answer:'
+        prompt ="""Answer the question below using the context below\nContext: <Img><ImageHere></Img>\nQuestion: {}\nAnswer: """.format(question)
+        batch_size = img_embeds.shape[0]
+        p_before, p_after = prompt.split('<ImageHere>')
+        p_before_tokens = self.llama_tokenizer(
+            p_before, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
+        p_after_tokens = self.llama_tokenizer(
+            p_after, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
+        p_before_embeds = self.embed_tokens(p_before_tokens.input_ids).expand(batch_size, -1, -1)
+        p_after_embeds = self.embed_tokens(p_after_tokens.input_ids).expand(batch_size, -1, -1)
+        wrapped_img_embeds = torch.cat([p_before_embeds, img_embeds, p_after_embeds], dim=1)
+        wrapped_atts_img = atts_img[:, :1].expand(-1, wrapped_img_embeds.shape[1])
+        return wrapped_img_embeds, wrapped_atts_img
+
+
     def forward(self, samples):
         image = samples["image"]
         img_embeds, atts_img = self.encode_img(image)
         img_embeds = self.layer_norm(img_embeds)
-
-        img_embeds, atts_img = self.prompt_wrap(img_embeds, atts_img)
+        if self.args.vqa:
+            img_embeds, atts_img = self.prompt_wrap_vqa(img_embeds, atts_img, samples['question'])
+        else:
+            img_embeds, atts_img = self.prompt_wrap(img_embeds, atts_img)
 
         self.llama_tokenizer.padding_side = "right"
-        text = [t + self.end_sym for t in samples["input_text"]]
+        text = [t + self.end_sym for t in samples["input_text"]] # this is now the answer to the question
 
         to_regress_tokens = self.llama_tokenizer(
             text,
@@ -160,23 +232,23 @@ class R2GenGPT(pl.LightningModule):
             truncation=True,
             max_length=self.hparams.max_length,
             add_special_tokens=False
-        ).to(image[0].device)
+        ).to(image[0].device) # Answer tokens
 
         targets = to_regress_tokens.input_ids.masked_fill(
             to_regress_tokens.input_ids == 0, -100
-        )
+        ) # Answer tokens
 
         empty_targets = (
             torch.ones([atts_img.shape[0], atts_img.shape[1]+1],
                        dtype=torch.long).to(image[0].device).fill_(-100)  # plus one for bos
-        )
-        targets = torch.cat([empty_targets, targets], dim=1)
+        ) # Empty targets with -100 values
+        targets = torch.cat([empty_targets, targets], dim=1) # Empty targets with -100 values and answer tokens
 
         batch_size = img_embeds.shape[0]
         bos = torch.ones([batch_size, 1],
                          dtype=to_regress_tokens.input_ids.dtype,
                          device=to_regress_tokens.input_ids.device) * self.llama_tokenizer.bos_token_id
-        bos_embeds = self.embed_tokens(bos)
+        bos_embeds = self.embed_tokens(bos) # bos token
         atts_bos = atts_img[:, :1]
 
         to_regress_embeds = self.embed_tokens(to_regress_tokens.input_ids)
@@ -190,17 +262,6 @@ class R2GenGPT(pl.LightningModule):
             labels=targets,
         )
         loss = outputs.loss
-        # check if loss is nan
-        """
-        if torch.isnan(loss):
-            save_to_inputs_embeds = os.path.join(self.hparams.savedmodel_path, 'nan_loss_cause',"inputs_embeds.pth")
-            save_to_attention_mask = os.path.join(self.hparams.savedmodel_path, 'nan_loss_cause',"attention_mask.pth")
-            save_to_targets = os.path.join(self.hparams.savedmodel_path, 'nan_loss_cause',"targets.pth")
-            torch.save(inputs_embeds, save_to_inputs_embeds)
-            torch.save(attention_mask, save_to_attention_mask)
-            torch.save(targets, save_to_targets)
-            raise ValueError
-        """
         return {"loss": loss}
 
     def training_step(self, batch, batch_idx):
@@ -226,14 +287,23 @@ class R2GenGPT(pl.LightningModule):
         os.makedirs(os.path.join(self.hparams.savedmodel_path, 'checkpoints'), exist_ok=True)
         save_to = os.path.join(
             self.hparams.savedmodel_path, 'checkpoints',
-            "checkpoint_epoch{}_step{}_bleu{:3f}_cider{:3f}.pth".format(current_epoch, global_step, eval_res['Bleu_4'], eval_res['CIDEr']),
+            "checkpoint_epoch{}_step{}_bleu{:3f}_cider{:3f}_acc{:3f}.pth".format(current_epoch, global_step, eval_res['Bleu_4'], eval_res['CIDEr'], eval_res['Accuracy']),
         )
         self.print("Saving checkpoint at step {} to {}.".format(global_step, save_to))
         torch.save(save_obj, save_to)
     
 
     def validation_step(self, samples, batch_idx):
+        image = samples["image"]
+        img_embeds, atts_img = self.encode_img(image)
+        img_embeds = self.layer_norm(img_embeds)
+        if self.args.vqa:
+            img_embeds, atts_img = self.prompt_wrap_vqa(img_embeds, atts_img, samples['question'])
+        else:
+            img_embeds, atts_img = self.prompt_wrap(img_embeds, atts_img)
+
         self.llama_tokenizer.padding_side = "right"
+        # * No adding of the EOS because that one should be present in the predicted text
         to_regress_tokens = self.llama_tokenizer(
             samples['input_text'],
             return_tensors="pt",
@@ -242,11 +312,6 @@ class R2GenGPT(pl.LightningModule):
             max_length=self.hparams.max_length,
             add_special_tokens=False
         )
-
-        image = samples["image"]
-        img_embeds, atts_img = self.encode_img(image)
-        img_embeds = self.layer_norm(img_embeds)
-        img_embeds, atts_img = self.prompt_wrap(img_embeds, atts_img)
 
         batch_size = img_embeds.shape[0]
         bos = torch.ones([batch_size, 1],
@@ -272,7 +337,10 @@ class R2GenGPT(pl.LightningModule):
             )
             hypo = [self.decode(i) for i in outputs]
             ref = [self.decode(i) for i in to_regress_tokens['input_ids']]
-            self.val_step_outputs.append({"hypo": hypo, "ref": ref, "id": samples["id"]})
+            if self.args.vqa:
+                self.val_step_outputs.append({"hypo": hypo, "ref": ref, "id": samples["q_id"]}) # use question id if VQA
+            else:
+                self.val_step_outputs.append({"hypo": hypo, "ref": ref, "id": samples["id"]})
             return hypo, ref
     
     def decode(self, output_token):

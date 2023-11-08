@@ -1,6 +1,8 @@
 import argparse
 
 parser = argparse.ArgumentParser(description="hyper-parameter for R2GenGPT")
+# ========================= Mode Configs ==========================
+parser.add_argument('--vqa', default=False, type=bool, help="Whether or not to run VQA task")
 # ========================= Dataset Configs ==========================
 parser.add_argument('--test', action='store_true', help="only run test set")
 parser.add_argument('--validate', action='store_true', help="only run validation set")
@@ -15,7 +17,9 @@ parser.add_argument('--num_workers', default=8, type=int, help="Cpu num for data
 
 # ========================= Model Settings ============================
 parser.add_argument('--vision_model', default='microsoft/swin-base-patch4-window7-224', type=str, help="vision model to use")
+#parser.add_argument('--llama_model', default='meta-llama/Llama-2-7b-hf', type=str, help="LLM model to use")
 parser.add_argument('--llama_model', default='meta-llama/Llama-2-7b-chat-hf', type=str, help="LLM model to use")
+parser.add_argument('--llm_freeze', default=True, type=lambda x: (str(x).lower() == 'true'), help="whether freeze LLM model")
 parser.add_argument('--freeze_vm', default=True, type=lambda x: (str(x).lower() == 'true'), help='freeze vision model')
 parser.add_argument('--llm_use_lora', default=False, type=lambda x: (str(x).lower() == 'true'), help="whether use lora for LLM model")
 parser.add_argument('--llm_r', default=16, type=int, help='The dimension used by the LoRA update matrices')

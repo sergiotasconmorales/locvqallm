@@ -68,6 +68,12 @@ class FieldParser:
                 image = self._parse_image(array)
                 images.append(image)
         to_return["image"] = images
+        if 'question' in features:
+            question = features['question']
+            to_return['question'] = question
+        if 'q_id' in features:
+            q_id = features['q_id']
+            to_return['q_id'] = q_id
         return to_return
 
 
