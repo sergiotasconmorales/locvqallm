@@ -10,6 +10,11 @@ import lightning.pytorch as pl
  
 def train(args):
     dm = DataModule(args)
+
+    # for debugging
+    dm.setup('fit')
+    a = dm.dataset['train'][0]
+
     callbacks = add_callbacks(args)
 
     trainer = pl.Trainer(

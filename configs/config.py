@@ -2,7 +2,10 @@ import argparse
 
 parser = argparse.ArgumentParser(description="hyper-parameter for R2GenGPT")
 # ========================= Mode Configs ==========================
-parser.add_argument('--vqa', default=False, type=bool, help="Whether or not to run VQA task")
+parser.add_argument('--vqa', action='store_true', help="Whether or not to run VQA task")
+parser.add_argument('--regions', action='store_true', help="Whether or not to load a region-based dataset")
+parser.add_argument('--ours', action='store_true', help="Whether or not to run our method")
+parser.add_argument('--baseline', type=str, default='crop_region', help="no_mask or region_in_text or crop_region or draw_region")
 # ========================= Dataset Configs ==========================
 parser.add_argument('--test', action='store_true', help="only run test set")
 parser.add_argument('--validate', action='store_true', help="only run validation set")
@@ -37,7 +40,7 @@ parser.add_argument('--savedmodel_path', type=str, default='save/mimic/v1')
 parser.add_argument('--ckpt_file', type=str, default=None, help='the checkpoint file to load')
 parser.add_argument('--delta_file', type=str, default=None, help='the delta file to load')
 parser.add_argument('--weights', type=list, default=[0.5, 0.5])
-parser.add_argument('--scorer_types', type=list, default=['Bleu_4', 'CIDEr'])
+parser.add_argument('--scorer_types', type=list, default=['Bleu_1', 'Accuracy']) # changed from BLEU4, CIDEr
 
 # ========================= Learning Configs ==========================
 parser.add_argument('--learning_rate', default=1e-4, type=float, help='initial learning rate')
