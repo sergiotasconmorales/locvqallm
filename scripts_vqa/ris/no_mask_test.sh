@@ -24,7 +24,7 @@ savepath="./save/$dataset/$version"
     --llm_use_lora False \
     --llm_freeze False \
     --savedmodel_path ${savepath} \
-    --max_length 100 \
+    --max_length 4 \
     --min_new_tokens 1 \
     --max_new_tokens 15 \
     --repetition_penalty 2.0 \

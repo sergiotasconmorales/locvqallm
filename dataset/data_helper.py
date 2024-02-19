@@ -92,10 +92,10 @@ class FieldParserRegions(FieldParser):
         self.digit2word = {'0': 'zero', '1': 'one', '2': 'two', '3': 'three', '4': 'four', 
                             '5': 'five', '6': 'six', '7': 'seven', '8': 'eight', '9': 'nine'}
 
-    def get_mask(self, mask_coords, mask_size):
+    def get_mask(self, mask_coords, mask_size, mask_type = 'rectangle'):
         # From locvqa repo, changed to return numpy array instead of tensor
         # mask_coords has the format ((y,x), h, w)
-        if 2==1: # requires ellipse regions (DECIDE FROM MASK_COORDS FORMAT)
+        if mask_type == 'ellipse': # requires ellipse regions (DECIDE FROM MASK_COORDS FORMAT)
             mask_ref = Image.new('L', mask_size, 0)
             mask = ImageDraw.Draw(mask_ref)
             mask.ellipse([(mask_coords[0][1], mask_coords[0][0]),(mask_coords[0][1] + mask_coords[2], mask_coords[0][0] + mask_coords[1])], fill=1)
@@ -105,16 +105,16 @@ class FieldParserRegions(FieldParser):
             mask[mask_coords[0][0]:mask_coords[0][0]+mask_coords[1] , mask_coords[0][1]:mask_coords[0][1]+mask_coords[2]] = 1
         return mask
 
-    def draw_region(self, img, coords, r=2):
+    def draw_region(self, img, coords, r=2, mask_type = 'rectangle'):
         # From locvqa repo, changed to return numpy array instead of tensor
-        if 2==1: # requires ellipse regions
+        if mask_type == 'ellipse': # requires ellipse regions
             img_ref = T.ToPILImage()(img)
             ((y,x), h, w) = coords
             draw = ImageDraw.Draw(img_ref)
             draw.ellipse([(x, y),(x + w, y + h)], outline='red')
             img_ref = np.array(img_ref)
             return img_ref
-        else:
+        elif mask_type == 'rectangle': # requires rectangle regions
             ((y,x), h, w) = coords
 
             for i in range(3):
@@ -129,6 +129,8 @@ class FieldParserRegions(FieldParser):
             img[y-r:y+h+r, x+w-r:x+w+r, 0] = 255
             img[y+h-r:y+h+r, x-r:x+w+r, 0] = 255
             return img
+        else:
+            raise NotImplementedError
 
     # override parse method
     def parse(self, features):
@@ -137,6 +139,7 @@ class FieldParserRegions(FieldParser):
         report = self.clean_report(report)
         to_return['input_text'] = report
         images = []
+        masks = []
         for image_path in features['image_path']: # ! although capable of handling multiple images, only one image is used in the dataset
             with Image.open(os.path.join(self.args.base_dir, image_path)) as pil:
                 array = np.array(pil, dtype=np.uint8)
@@ -144,18 +147,39 @@ class FieldParserRegions(FieldParser):
                 if array.shape[-1] != 3 or len(array.shape) != 3:
                     array = np.array(pil.convert("RGB"), dtype=np.uint8)
                 if self.regions:
-                    mask = self.get_mask(features['mask_coords'], features['mask_size']) # get mask
+                    mask = self.get_mask(features['mask_coords'], features['mask_size'], mask_type = features['mask_type']) # get mask
+                    mask_copy = mask.copy()
                 # Now, depending on baseline, apply mask to image or draw region on image
                 if self.baseline == 'crop_region':
                     array = array * np.expand_dims(mask, axis=2) # apply mask to image
                 elif self.baseline == 'draw_region' or 'region_in_text_sep_t' in self.baseline: # region_in_text_sep_tX is just to test (see pp. 32)
-                    array = self.draw_region(array, features['mask_coords'])
+                    array = self.draw_region(array, features['mask_coords'], mask_type = features['mask_type']) # draw region on image
                 elif self.baseline == 'context_only':
                     # multiply array with complement of the mask
                     array = array * (1 - np.expand_dims(mask, axis=2))
-                image = self._parse_image(array) # applies vision model pre-processing
-                images.append(image)
+                elif self.baseline == 'complementary':
+                    # multiply array with complement of the mask
+                    array_co = array * (1 - np.expand_dims(mask, axis=2))
+                    # also create the crop_region image
+                    array_cr = array_copy.copy() * np.expand_dims(mask, axis=2)
+                    # concatenate original image from array_copy and crop_region image from array
+                if self.baseline != 'complementary':
+                    image = self._parse_image(array) # applies vision model pre-processing
+                    images.append(image)
+                else:
+                    image_dr = self._parse_image(self.draw_region(array_copy, features['mask_coords'], mask_type = features['mask_type'])) # draw region on image)
+                    image_co = self._parse_image(array_co)
+                    image_cr = self._parse_image(array_cr)
+                    images.append(image_dr) 
+                    images.append(image_co)
+                    images.append(image_cr)
+                # masks
+                # resize mask to 7x7
+                mask = T.Resize(7, antialias=None, interpolation = T.InterpolationMode.NEAREST)(torch.from_numpy(np.array(mask, dtype=np.uint8)).unsqueeze(0))
+                mask = mask.view(49,-1) # tailored to swin transformer
+                masks.append(mask)
         to_return["image"] = images
+        to_return["mask"] = masks
         if 'question' in features:
             if self.baseline == 'region_in_text':
                 question = features['question_alt']
@@ -188,10 +212,17 @@ class FieldParserRegions(FieldParser):
         if 'mask_size' in features:
             mask_size = features['mask_size']
             to_return['mask_size'] = mask_size
-        # TODO: The following works for insegcat and ris because all questions are about regions, but for DME, modify
+        to_return['region'] = [self._parse_image(np.zeros_like(array_copy))] # For questions about whole image, return empty region
         if (self.baseline == 'mask' or self.baseline == 'draw_region') and features['question_type'] == 'region':
-            region = array_copy[mask_coords[0][0]:mask_coords[0][0]+mask_coords[1] , mask_coords[0][1]:mask_coords[0][1]+mask_coords[2], :]
+            if features['mask_type'] == 'ellipse':
+                array_copy = array_copy * np.expand_dims(mask_copy, axis=2) # apply mask to image
+                region = array_copy[mask_coords[0][0]:mask_coords[0][0]+mask_coords[1] , mask_coords[0][1]:mask_coords[0][1]+mask_coords[2], :]
+            else:
+                region = array_copy[mask_coords[0][0]:mask_coords[0][0]+mask_coords[1] , mask_coords[0][1]:mask_coords[0][1]+mask_coords[2], :]
             to_return['region'] = [self._parse_image(region)] # same pre-processing as image
+        elif self.baseline == 'context_only' and features['question_type'] == 'region':
+            array_copy = array_copy * np.expand_dims(mask_copy, axis=2)
+            to_return['region'] = [self._parse_image(array_copy)]
         return to_return
 
 class ParseDataset(data.Dataset):

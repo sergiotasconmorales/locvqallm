@@ -37,7 +37,7 @@ fi
     --length_penalty -1.0 \
     --num_workers 4 \
     --devices 2 \
-    --max_epochs 10 \
+    --max_epochs 15 \
     --limit_val_batches 0.5 \
     --val_check_interval 0.5 \
     --num_sanity_val_steps 2 \

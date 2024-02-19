@@ -32,7 +32,7 @@ fi
     --savedmodel_path ${savepath} \
     --learning_rate 1e-4 \
     --gradient_clip_val 1 \
-    --max_length 100 \
+    --max_length 4 \
     --repetition_penalty 2.0 \
     --length_penalty -1.0 \
     --num_workers 4 \

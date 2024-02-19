@@ -4,7 +4,7 @@ env_name="locvqallm"
 dataset="ris"
 annotation="./data/ris/processed/anns.json"
 base_dir="/storage/homefs/st20f757/vqa/data/Tools/STS2017_v2/images"
-delta_file="/storage/homefs/st20f757/vqa/locvqallm/save/ris/v1_context_only/checkpoints/checkpoint_epoch6_step6324_bleu0.000933_cider4.146341_acc0.829268.pth"
+delta_file="/storage/homefs/st20f757/vqa/locvqallm/save/ris/v1_context_only/checkpoints/checkpoint_epoch14_step14594_bleu0.000987_cider4.822154_acc0.964431.pth"
 
 version="v1_context_only"
 savepath="./save/$dataset/$version"

@@ -4,9 +4,9 @@ env_name="locvqallm"
 dataset="insegcat"
 annotation="./data/insegcat/processed/anns.json"
 base_dir="/storage/homefs/st20f757/vqa/data/Tools/INSEGCAT_v1/images"
-delta_file="/storage/homefs/st20f757/vqa/locvqallm/save/insegcat/v1_insegcat/checkpoints/checkpoint_epoch3_step6426_bleu0.000803_cider2.702703_acc0.540541.pth"
+delta_file="/storage/homefs/st20f757/vqa/locvqallm/save/insegcat/v1_no_mask/checkpoints/checkpoint_epoch0_step918_bleu0.000803_cider2.702703_acc0.540541.pth"
 
-version="v1_insegcat"
+version="v1_no_mask"
 savepath="./save/$dataset/$version"
 
 ~/.conda/envs/${env_name}/bin/python -u train.py \

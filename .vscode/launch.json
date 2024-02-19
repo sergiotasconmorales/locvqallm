@@ -10,7 +10,7 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "args": ["--vqa", "--regions", "--baseline", "region_in_text_sep", "--dataset", "insegcat", "--base_dir", "/storage/homefs/st20f757/vqa/data/Tools/INSEGCAT_v1/images", "--annotation", "./data/insegcat/processed/anns.json"]
+            "args": ["--vqa", "--regions", "--baseline", "draw_region", "--dataset", "dme", "--base_dir", "/storage/homefs/st20f757/vqa/data/Tools/DME_v2/images", "--annotation", "./data/dme/processed/anns.json"]
         }
     ]
 }

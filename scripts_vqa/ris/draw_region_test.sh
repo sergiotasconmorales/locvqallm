@@ -4,7 +4,7 @@ env_name="locvqallm"
 dataset="ris"
 annotation="./data/ris/processed/anns.json"
 base_dir="/storage/homefs/st20f757/vqa/data/Tools/STS2017_v2/images"
-delta_file="/storage/homefs/st20f757/vqa/locvqallm/save/ris/v1_draw_region/checkpoints/checkpoint_epoch6_step6810_bleu0.000932_cider4.136179_acc0.827236.pth"
+delta_file="/storage/homefs/st20f757/vqa/locvqallm/save/ris/v1_draw_region/checkpoints/checkpoint_epoch9_step9243_bleu0.000985_cider4.801829_acc0.960366.pth"
 
 version="v1_draw_region"
 savepath="./save/$dataset/$version"
@@ -25,7 +25,7 @@ savepath="./save/$dataset/$version"
     --llm_use_lora False \
     --llm_freeze False \
     --savedmodel_path ${savepath} \
-    --max_length 100 \
+    --max_length 4 \
     --min_new_tokens 1 \
     --max_new_tokens 15 \
     --repetition_penalty 2.0 \

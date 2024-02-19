@@ -5,7 +5,7 @@ dataset="insegcat"
 annotation="./data/insegcat/processed/anns.json"
 base_dir="/storage/homefs/st20f757/vqa/data/Tools/INSEGCAT_v1/images"
 
-version="v1_draw_region"
+version="v2_draw_region"
 savepath="./save/$dataset/$version"
 
 if [ ! -d "$savepath" ]; then

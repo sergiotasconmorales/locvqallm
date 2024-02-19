@@ -46,6 +46,7 @@ for subset in subsets:
                                 'question_alt': question_alt, 
                                 'mask_coords': mask_coords,
                                 'mask_size': mask_size,
+                                'mask_type': 'rectangle',
                                 'question_type': question_type,
                                 'question_object': question_object,
                                 'report': answer, 

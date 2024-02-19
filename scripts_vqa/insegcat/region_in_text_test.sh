@@ -4,7 +4,7 @@ env_name="locvqallm"
 dataset="insegcat"
 annotation="./data/insegcat/processed/anns.json"
 base_dir="/storage/homefs/st20f757/vqa/data/Tools/INSEGCAT_v1/images"
-delta_file="/storage/homefs/st20f757/vqa/locvqallm/save/insegcat/v1_region_in_text_sep/checkpoints/***"
+delta_file="/storage/homefs/st20f757/vqa/locvqallm/save/insegcat/v1_region_in_text_sep/checkpoints/checkpoint_epoch10_step40392_bleu0.000884_cider3.559578_acc0.711916.pth"
 
 version="v1_region_in_text_sep"
 savepath="./save/$dataset/$version"

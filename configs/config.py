@@ -6,6 +6,8 @@ parser.add_argument('--vqa', action='store_true', help="Whether or not to run VQ
 parser.add_argument('--regions', action='store_true', help="Whether or not to load a region-based dataset")
 parser.add_argument('--ours', action='store_true', help="Whether or not to run our method")
 parser.add_argument('--baseline', type=str, default='crop_region', help="no_mask or region_in_text or crop_region or draw_region")
+parser.add_argument('--ours_version', type=str, default='ours2', help="Which wrapper to use for our method")
+parser.add_argument('--miccai2023', action='store_true', help="Whether or not to use MICCAI 2023 method")
 # ========================= Dataset Configs ==========================
 parser.add_argument('--test', action='store_true', help="only run test set")
 parser.add_argument('--validate', action='store_true', help="only run validation set")

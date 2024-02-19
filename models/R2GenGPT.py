@@ -3,6 +3,7 @@ import json
 import torch
 import torch.nn as nn
 import lightning.pytorch as pl
+from sklearn.metrics import f1_score
 from transformers import LlamaForCausalLM, LlamaTokenizer
 from evalcap.bleu.bleu import Bleu
 from evalcap.rouge.rouge import Rouge
@@ -57,6 +58,27 @@ class Accuracy(object):
         self._total = 0
         return accuracy, 0
 
+
+class F1_Score(Accuracy):
+    # F1 score compares text in a strict manner.
+    def __init__(self) -> None:
+        super().__init__()
+        self._ans2int = {}
+
+    def compute_score(self, ref, hypo):
+        # apply same format
+        for k, v in ref.items():
+            assert isinstance(v, list) and len(v) == 1
+            assert isinstance(hypo[k], list) and len(hypo[k]) == 1
+            v = self.clean(v[0])
+            hypo[k] = self.clean(hypo[k][0])
+        all_ans_ref = set([ans for k, v in ref.items() for ans in v])
+        self._ans2int = {ans: i for i, ans in enumerate(all_ans_ref)}
+        # encode
+        ref_encoded = [self._ans2int[v[0]] for _, v in ref.items()]
+        hypo_encoded = [self._ans2int[hypo[k][0]] for k, _ in ref.items()]
+        f1 = f1_score(ref_encoded, hypo_encoded, average='micro')
+        return f1, 0
 
 
 class R2GenGPT(pl.LightningModule):
@@ -114,6 +136,10 @@ class R2GenGPT(pl.LightningModule):
             self.llama_model.print_trainable_parameters()
             print('Loading LLAMA LoRA Done')         
         elif args.llm_freeze:
+            for param in self.llama_model.parameters():
+                # Check if parameter dtype is  Half (float16)
+                if param.dtype == torch.float16:
+                    param.data = param.data.to(torch.float32)
             self.embed_tokens = self.llama_model.get_input_embeddings()
             for name, param in self.llama_model.named_parameters():
                 param.requires_grad = False
@@ -153,6 +179,8 @@ class R2GenGPT(pl.LightningModule):
             (Cider(), "CIDEr"),
             (Accuracy(), "Accuracy")
         ]
+        #if self.args.dataset in ['insegcat', 'ris']: # If dataset only has binary answers, use F1 score too
+        #    scorers.append((F1_Score(), "F1_Score"))
         final_scores = {}
         for scorer, method in scorers:
             score, scores = scorer.compute_score(ref, hypo)
@@ -227,62 +255,208 @@ class R2GenGPT(pl.LightningModule):
                                             p_after_question_tokens.attention_mask.expand(batch_size, -1)], dim = 1 ) # size [B, 14 + 49(from img_embeds) + 4 + max_question_len_in_batch + 4]
         return wrapped_prompt_embeds, wrapped_atts_prompt
 
-    def prompt_wrap_vqa_wrong(self, img_embeds, atts_img, question):
-        # In case question is present, use it instead of self.prompt
-        #prompt=f'Human: <Img><ImageHere></Img> {question} \nAssistant:'
-        #prompt=f'You are a helpful medical assistant that answers questions about images. Here is a question: {question} <Img><ImageHere></Img> Answer:'
-        prompt ="""Answer the question below using the context below\nContext: <Img><ImageHere></Img>\nQuestion: {}\nAnswer: """.format(question)
-        batch_size = img_embeds.shape[0]
-        p_before, p_after = prompt.split('<ImageHere>')
-        p_before_tokens = self.llama_tokenizer(
-            p_before, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
-        p_after_tokens = self.llama_tokenizer(
-            p_after, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
-        p_before_embeds = self.embed_tokens(p_before_tokens.input_ids).expand(batch_size, -1, -1)
-        p_after_embeds = self.embed_tokens(p_after_tokens.input_ids).expand(batch_size, -1, -1)
-        wrapped_img_embeds = torch.cat([p_before_embeds, img_embeds, p_after_embeds], dim=1)
-        wrapped_atts_img = atts_img[:, :1].expand(-1, wrapped_img_embeds.shape[1])
-        return wrapped_img_embeds, wrapped_atts_img
 
-    def prompt_wrap_vqa_special1(self, img_embeds, atts_img, region_embeds, atts_region, question):
-        # First tried ours, but this is not working better than draw_region
-        prompt ="""Answer the question below using the context below\nContext: <Img><ImageHere></Img>\nQuestion: {}\nAnswer: """.format(question)
-        batch_size = img_embeds.shape[0]
-        p_before, p_after = prompt.split('<ImageHere>')
-        p_before_tokens = self.llama_tokenizer(
-            p_before, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
-        p_after_tokens = self.llama_tokenizer(
-            p_after, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
-        p_before_embeds = self.embed_tokens(p_before_tokens.input_ids).expand(batch_size, -1, -1)
-        p_after_embeds = self.embed_tokens(p_after_tokens.input_ids).expand(batch_size, -1, -1)
-        wrapped_img_embeds = torch.cat([p_before_embeds, img_embeds, region_embeds, p_after_embeds], dim=1)
-        # combine atts_img with atts_region with 1 as max value
-        atts_img = atts_img[:, :1].expand(-1, wrapped_img_embeds.shape[1])
-        atts_region = atts_region[:, :1].expand(-1, wrapped_img_embeds.shape[1])
-        atts_img = torch.max(atts_img, atts_region)
-        return wrapped_img_embeds, atts_img
-
-    def prompt_wrap_vqa_special2(self, img_embeds, atts_img, region_embeds, atts_region, question):
-        prompt ="""Answer the question below using the context and region below\nContext: <Img><ImageHere></Img>\nRegion: <Img><RegionHere></Img>\nQuestion: {}\nAnswer: """.format(question)
-        batch_size = img_embeds.shape[0]
-        p_before_image, p_after_image = prompt.split('<ImageHere>')
-        p_before_region, p_after_region = p_after_image.split('<RegionHere>')
+    def ours4(self, img_embeds, atts_img, region_embeds, atts_region, question):
+        base_prompt ="""Answer the question below using the context below\nContext: <Img><ImageHere></Img>\nQuestion: <QuestionHere>\nAnswer: """ # prompt for each batch item. Image tokens always have same shape, but question will vary
+        batch_size = img_embeds.shape[0] # call it B
+        p_before_image, p_after_image = base_prompt.split('<ImageHere>')
         p_before_image_tokens = self.llama_tokenizer(
-            p_before_image, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
-        p_before_region_tokens = self.llama_tokenizer(
-            p_before_region, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
-        p_after_region_tokens = self.llama_tokenizer(
-            p_after_region, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
+            p_before_image, return_tensors="pt", add_special_tokens=False).to(img_embeds.device) # size [1, 14]
+        p_after_image_before_question, p_after_question = p_after_image.split('<QuestionHere>')
+        p_after_image_before_question_tokens = self.llama_tokenizer(
+            p_after_image_before_question, return_tensors="pt", add_special_tokens=False).to(img_embeds.device) # size [1, 7]
+        p_after_question_tokens = self.llama_tokenizer(
+            p_after_question, return_tensors="pt", add_special_tokens=False).to(img_embeds.device) # size [1, 5]
+        # now get the question tokens using padding
+        question_tokens = self.llama_tokenizer(
+            question,
+            return_tensors="pt",
+            padding=True,
+            add_special_tokens=False
+        ).to(img_embeds.device) # should be e.g. [B, max_question_len_in_batch] = [12, 13]
+        # get embeddings
+        p_before_image_embeds = self.embed_tokens(p_before_image_tokens.input_ids).expand(batch_size, -1, -1) # size [B, 14, 4096]
+        p_after_image_before_question_embeds = self.embed_tokens(p_after_image_before_question_tokens.input_ids).expand(batch_size, -1, -1)  # size [B, 7, 4096]
+        p_after_question_embeds = self.embed_tokens(p_after_question_tokens.input_ids).expand(batch_size, -1, -1) # size [B, 5, 4096]
+        question_embeds = self.embed_tokens(question_tokens.input_ids) # size [B, max_question_len_in_batch, 4096]
+        # put embeddings together following the prompt
+        wrapped_prompt_embeds = torch.cat([p_before_image_embeds, img_embeds, region_embeds, p_after_image_before_question_embeds, question_embeds, p_after_question_embeds], dim=1) # should be [B, 14 + 49(from img_embeds) + 4 + max_question_len_in_batch + 4, 4096]
+        # this time, we need to combine attention masks from all parts of the prompt
+        wrapped_atts_prompt = torch.cat([   p_before_image_tokens.attention_mask.expand(batch_size, -1), 
+                                            atts_img,
+                                            atts_region, 
+                                            p_after_image_before_question_tokens.attention_mask.expand(batch_size, -1),
+                                            question_tokens.attention_mask,
+                                            p_after_question_tokens.attention_mask.expand(batch_size, -1)], dim = 1 ) # size [B, 14 + 49(from img_embeds) + 4 + max_question_len_in_batch + 4]
+        return wrapped_prompt_embeds, wrapped_atts_prompt
+
+    def ours2(self, img_embeds, atts_img, region_embeds, atts_region, question):
+        # Similar to prompt_wrap_vqa_special1, but this time the region is given in the prompt in a different location (separately)
+        base_prompt ="""Answer the question below using the context and region below\nContext: <Img><ImageHere></Img>\nZoom in to region: <Img><RegionHere></Img>\nQuestion: <QuestionHere>\nAnswer: """
+        batch_size = img_embeds.shape[0]
+        p_before_image, p_after_image = base_prompt.split('<ImageHere>')
+        p_before_image_tokens = self.llama_tokenizer(
+            p_before_image, return_tensors="pt", add_special_tokens=False).to(img_embeds.device) # size [1, 14]
+        p_after_image_before_region, p_after_region = p_after_image.split('<RegionHere>')
+        p_after_image_before_region_tokens = self.llama_tokenizer(
+            p_after_image_before_region, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
+        p_after_region_before_question, p_after_question = p_after_region.split('<QuestionHere>')
+        p_after_region_before_question_tokens = self.llama_tokenizer(
+            p_after_region_before_question, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
+        p_after_question_tokens = self.llama_tokenizer(
+            p_after_question, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
+        # now get the question tokens using padding
+        question_tokens = self.llama_tokenizer(
+            question,
+            return_tensors="pt",
+            padding=True,
+            add_special_tokens=False
+        ).to(img_embeds.device)
+        # get embeddings
         p_before_image_embeds = self.embed_tokens(p_before_image_tokens.input_ids).expand(batch_size, -1, -1)
+        p_after_image_before_region_embeds = self.embed_tokens(p_after_image_before_region_tokens.input_ids).expand(batch_size, -1, -1)
+        p_after_region_before_question_embeds = self.embed_tokens(p_after_region_before_question_tokens.input_ids).expand(batch_size, -1, -1)
+        p_after_question_embeds = self.embed_tokens(p_after_question_tokens.input_ids).expand(batch_size, -1, -1)
+        question_embeds = self.embed_tokens(question_tokens.input_ids)
+        # put embeddings together following the prompt
+        wrapped_prompt_embeds = torch.cat([p_before_image_embeds, img_embeds, p_after_image_before_region_embeds, region_embeds, p_after_region_before_question_embeds, question_embeds, p_after_question_embeds], dim=1)
+        # this time, we need to combine attention masks from all parts of the prompt
+        wrapped_atts_prompt = torch.cat([   p_before_image_tokens.attention_mask.expand(batch_size, -1), 
+                                            atts_img,
+                                            p_after_image_before_region_tokens.attention_mask.expand(batch_size, -1),
+                                            atts_region,
+                                            p_after_region_before_question_tokens.attention_mask.expand(batch_size, -1),
+                                            question_tokens.attention_mask,
+                                            p_after_question_tokens.attention_mask.expand(batch_size, -1)], dim = 1 )
+        return wrapped_prompt_embeds, wrapped_atts_prompt
+
+
+    def ours3(self, img_embeds, atts_img, region_embeds, atts_region, question):
+        # Similar to prompt_wrap_vqa_special1, but this time the region is given in the prompt in a different location (separately)
+        base_prompt ="""Answer the question below based on this region <Img><ImageHere></Img> but also consider this context: <Img><RegionHere></Img>\nQuestion: <QuestionHere>\nAnswer: """
+        batch_size = img_embeds.shape[0]
+        p_before_image, p_after_image = base_prompt.split('<ImageHere>')
+        p_before_image_tokens = self.llama_tokenizer(
+            p_before_image, return_tensors="pt", add_special_tokens=False).to(img_embeds.device) # size [1, 14]
+        p_after_image_before_region, p_after_region = p_after_image.split('<RegionHere>')
+        p_after_image_before_region_tokens = self.llama_tokenizer(
+            p_after_image_before_region, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
+        p_after_region_before_question, p_after_question = p_after_region.split('<QuestionHere>')
+        p_after_region_before_question_tokens = self.llama_tokenizer(
+            p_after_region_before_question, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
+        p_after_question_tokens = self.llama_tokenizer(
+            p_after_question, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
+        # now get the question tokens using padding
+        question_tokens = self.llama_tokenizer(
+            question,
+            return_tensors="pt",
+            padding=True,
+            add_special_tokens=False
+        ).to(img_embeds.device)
+        # get embeddings
+        p_before_image_embeds = self.embed_tokens(p_before_image_tokens.input_ids).expand(batch_size, -1, -1)
+        p_after_image_before_region_embeds = self.embed_tokens(p_after_image_before_region_tokens.input_ids).expand(batch_size, -1, -1)
+        p_after_region_before_question_embeds = self.embed_tokens(p_after_region_before_question_tokens.input_ids).expand(batch_size, -1, -1)
+        p_after_question_embeds = self.embed_tokens(p_after_question_tokens.input_ids).expand(batch_size, -1, -1)
+        question_embeds = self.embed_tokens(question_tokens.input_ids)
+        # put embeddings together following the prompt
+        # ! Below, I give region_embeds first, to account for disagreement above. This was easier than modifying all variables above
+        wrapped_prompt_embeds = torch.cat([p_before_image_embeds, region_embeds, p_after_image_before_region_embeds, img_embeds, p_after_region_before_question_embeds, question_embeds, p_after_question_embeds], dim=1)
+        # this time, we need to combine attention masks from all parts of the prompt
+        wrapped_atts_prompt = torch.cat([   p_before_image_tokens.attention_mask.expand(batch_size, -1), 
+                                            atts_img,
+                                            p_after_image_before_region_tokens.attention_mask.expand(batch_size, -1),
+                                            atts_region,
+                                            p_after_region_before_question_tokens.attention_mask.expand(batch_size, -1),
+                                            question_tokens.attention_mask,
+                                            p_after_question_tokens.attention_mask.expand(batch_size, -1)], dim = 1 )
+        return wrapped_prompt_embeds, wrapped_atts_prompt
+
+    def complementary_wrap(self, dr_embeds, atts_dr, co_embeds, atts_co, cr_embeds, atts_cr, question):
+        base_prompt ="""Answer the question below using the image, context and region below\nImage: <Img><ImageHere></Img>\nContext: <Img><ContextHere></Img>\nRegion: <Img><RegionHere></Img>\nQuestion: <QuestionHere>\nAnswer: """
+        batch_size = dr_embeds.shape[0]
+        p_before_image, p_after_image = base_prompt.split('<ImageHere>')
+        p_before_image_tokens = self.llama_tokenizer(
+            p_before_image, return_tensors="pt", add_special_tokens=False).to(dr_embeds.device)
+        p_after_image_before_context, p_after_context = p_after_image.split('<ContextHere>')
+        p_after_image_before_context_tokens = self.llama_tokenizer(
+            p_after_image_before_context, return_tensors="pt", add_special_tokens=False).to(dr_embeds.device)
+        p_after_context_before_region, p_after_region = p_after_context.split('<RegionHere>')
+        p_after_context_before_region_tokens = self.llama_tokenizer(
+            p_after_context_before_region, return_tensors="pt", add_special_tokens=False).to(dr_embeds.device)
+        p_after_region_before_question, p_after_question = p_after_region.split('<QuestionHere>')
+        p_after_region_before_question_tokens = self.llama_tokenizer(
+            p_after_region_before_question, return_tensors="pt", add_special_tokens=False).to(dr_embeds.device)
+        p_after_question_tokens = self.llama_tokenizer(
+            p_after_question, return_tensors="pt", add_special_tokens=False).to(dr_embeds.device)
+        # now get the question tokens using padding
+        question_tokens = self.llama_tokenizer(
+            question,
+            return_tensors="pt",
+            padding=True,
+            add_special_tokens=False
+        ).to(dr_embeds.device)
+        # get embeddings
+        p_before_image_embeds = self.embed_tokens(p_before_image_tokens.input_ids).expand(batch_size, -1, -1)
+        p_after_image_before_context_embeds = self.embed_tokens(p_after_image_before_context_tokens.input_ids).expand(batch_size, -1, -1)
+        p_after_context_before_region_embeds = self.embed_tokens(p_after_context_before_region_tokens.input_ids).expand(batch_size, -1, -1)
+        p_after_region_before_question_embeds = self.embed_tokens(p_after_region_before_question_tokens.input_ids).expand(batch_size, -1, -1)
+        p_after_question_embeds = self.embed_tokens(p_after_question_tokens.input_ids).expand(batch_size, -1, -1)
+        question_embeds = self.embed_tokens(question_tokens.input_ids)
+        # put embeddings together following the prompt
+        wrapped_prompt_embeds = torch.cat([p_before_image_embeds, dr_embeds, p_after_image_before_context_embeds, co_embeds, p_after_context_before_region_embeds, cr_embeds, p_after_region_before_question_embeds, question_embeds, p_after_question_embeds], dim=1)
+        # this time, we need to combine attention masks from all parts of the prompt
+        wrapped_atts_prompt = torch.cat([   p_before_image_tokens.attention_mask.expand(batch_size, -1), 
+                                            atts_dr,
+                                            p_after_image_before_context_tokens.attention_mask.expand(batch_size, -1),
+                                            atts_co,
+                                            p_after_context_before_region_tokens.attention_mask.expand(batch_size, -1),
+                                            atts_cr,
+                                            p_after_region_before_question_tokens.attention_mask.expand(batch_size, -1),
+                                            question_tokens.attention_mask,
+                                            p_after_question_tokens.attention_mask.expand(batch_size, -1)], dim = 1 )
+        return wrapped_prompt_embeds, wrapped_atts_prompt
+
+    def ours5(self, img_embeds, atts_img, region_embeds, atts_region, question):
+        # pp. 54
+        base_prompt ="""Answer the question below using the contents of the following region\nRegion: <Img><RegionHere></Img>\nBut also consider the region in context: <Img><ImageHere></Img>\nQuestion: <QuestionHere>\nAnswer: """
+        batch_size = img_embeds.shape[0]
+        p_before_region, p_after_region = base_prompt.split('<RegionHere>')
+        p_before_region_tokens = self.llama_tokenizer(
+            p_before_region, return_tensors="pt", add_special_tokens=False).to(img_embeds.device) # size [1, 14]
+        p_after_region_before_image, p_after_image = p_after_region.split('<ImageHere>')
+        p_after_region_before_image_tokens = self.llama_tokenizer(
+            p_after_region_before_image, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
+        p_after_image_before_question, p_after_question = p_after_image.split('<QuestionHere>')
+        p_after_image_before_question_tokens = self.llama_tokenizer(
+            p_after_image_before_question, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
+        p_after_question_tokens = self.llama_tokenizer(
+            p_after_question, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
+        # now get the question tokens using padding
+        question_tokens = self.llama_tokenizer(
+            question,
+            return_tensors="pt",
+            padding=True,
+            add_special_tokens=False
+        ).to(img_embeds.device)
+        # get embeddings
         p_before_region_embeds = self.embed_tokens(p_before_region_tokens.input_ids).expand(batch_size, -1, -1)
-        p_after_region_embeds = self.embed_tokens(p_after_region_tokens.input_ids).expand(batch_size, -1, -1)
-        wrapped_img_embeds = torch.cat([p_before_image_embeds, img_embeds, p_before_region_embeds, region_embeds, p_after_region_embeds], dim=1)
-        # combine atts_img with atts_region with 1 as max value
-        atts_img = atts_img[:, :1].expand(-1, wrapped_img_embeds.shape[1])
-        atts_region = atts_region[:, :1].expand(-1, wrapped_img_embeds.shape[1])
-        atts_img = torch.max(atts_img, atts_region)
-        return wrapped_img_embeds, atts_img
-        
+        p_after_region_before_image_embeds = self.embed_tokens(p_after_region_before_image_tokens.input_ids).expand(batch_size, -1, -1)
+        p_after_image_before_question_embeds = self.embed_tokens(p_after_image_before_question_tokens.input_ids).expand(batch_size, -1, -1)
+        p_after_question_embeds = self.embed_tokens(p_after_question_tokens.input_ids).expand(batch_size, -1, -1)
+        question_embeds = self.embed_tokens(question_tokens.input_ids)
+        # put embeddings together following the prompt
+        wrapped_prompt_embeds = torch.cat([p_before_region_embeds, region_embeds, p_after_region_before_image_embeds, img_embeds, p_after_image_before_question_embeds, question_embeds, p_after_question_embeds], dim=1)
+        # this time, we need to combine attention masks from all parts of the prompt
+        wrapped_atts_prompt = torch.cat([   p_before_region_tokens.attention_mask.expand(batch_size, -1), 
+                                            atts_img,
+                                            p_after_region_before_image_tokens.attention_mask.expand(batch_size, -1),
+                                            atts_region,
+                                            p_after_image_before_question_tokens.attention_mask.expand(batch_size, -1),
+                                            question_tokens.attention_mask,
+                                            p_after_question_tokens.attention_mask.expand(batch_size, -1)], dim = 1 )
+        return wrapped_prompt_embeds, wrapped_atts_prompt
+
 
     def forward(self, samples):
         image = samples["image"]
@@ -290,11 +464,25 @@ class R2GenGPT(pl.LightningModule):
         img_embeds = self.layer_norm(img_embeds)
         if self.args.vqa:
             if self.args.ours:
-                # if our method, use special wrapping where image an region are included in the prompt
-                region = samples['region']
-                region_embeds, atts_region = self.encode_img(region)
-                region_embeds = self.layer_norm(region_embeds)
-                img_embeds, atts_img = self.prompt_wrap_vqa_special1(img_embeds, atts_img, region_embeds, atts_region, samples['question'])
+                # special case: if args.ours is True and baseline=='complementary', then separate images
+                if self.args.baseline == 'complementary':
+                    dr_embeds, atts_dr = self.encode_img([image[0]])
+                    dr_embeds = self.layer_norm(dr_embeds)
+                    co_embeds, atts_co = self.encode_img([image[1]])
+                    co_embeds = self.layer_norm(co_embeds)
+                    cr_embeds, atts_cr = self.encode_img([image[2]])
+                    cr_embeds = self.layer_norm(cr_embeds)
+                    img_embeds, atts_img = getattr(self, self.args.ours_version)(dr_embeds, atts_dr, co_embeds, atts_co, cr_embeds, atts_cr, samples['question'])
+                else:
+                    # if our method, use special wrapping where image an region are included in the prompt
+                    region = samples['region']
+                    region_embeds, atts_region = self.encode_img(region)
+                    region_embeds = self.layer_norm(region_embeds)
+                    img_embeds, atts_img = getattr(self, self.args.ours_version)(img_embeds, atts_img, region_embeds, atts_region, samples['question'])
+            elif self.args.miccai2023:
+                mask = torch.stack(samples['mask'], dim=0).squeeze(2).squeeze(0).to(img_embeds.device) # size [B, 49, 1]
+                masked = img_embeds*mask
+                img_embeds, atts_img = self.prompt_wrap_vqa(masked, atts_img, samples['question']) # apply mask to image embeddings
             else:
                 img_embeds, atts_img = self.prompt_wrap_vqa(img_embeds, atts_img, samples['question'])
         else:
@@ -377,11 +565,24 @@ class R2GenGPT(pl.LightningModule):
         img_embeds = self.layer_norm(img_embeds)
         if self.args.vqa:
             if self.args.ours:
-                # if our method, use special wrapping where image an region are included in the prompt
-                region = samples['region']
-                region_embeds, atts_region = self.encode_img(region)
-                region_embeds = self.layer_norm(region_embeds)
-                img_embeds, atts_img = self.prompt_wrap_vqa_special1(img_embeds, atts_img, region_embeds, atts_region, samples['question'])
+                if self.args.baseline == 'complementary':
+                    dr_embeds, atts_dr = self.encode_img([image[0]])
+                    dr_embeds = self.layer_norm(dr_embeds)
+                    co_embeds, atts_co = self.encode_img([image[1]])
+                    co_embeds = self.layer_norm(co_embeds)
+                    cr_embeds, atts_cr = self.encode_img([image[2]])
+                    cr_embeds = self.layer_norm(cr_embeds)
+                    img_embeds, atts_img = getattr(self, self.args.ours_version)(dr_embeds, atts_dr, co_embeds, atts_co, cr_embeds, atts_cr, samples['question'])
+                else:
+                    # if our method, use special wrapping where image an region are included in the prompt
+                    region = samples['region']
+                    region_embeds, atts_region = self.encode_img(region)
+                    region_embeds = self.layer_norm(region_embeds)
+                    img_embeds, atts_img = getattr(self, self.args.ours_version)(img_embeds, atts_img, region_embeds, atts_region, samples['question'])
+            elif self.args.miccai2023:
+                mask = torch.stack(samples['mask'], dim=0).squeeze(2).squeeze(0).to(img_embeds.device) # size [B, 49, 1]
+                masked = img_embeds*mask
+                img_embeds, atts_img = self.prompt_wrap_vqa(masked, atts_img, samples['question']) # apply mask to image embeddings
             else:
                 img_embeds, atts_img = self.prompt_wrap_vqa(img_embeds, atts_img, samples['question'])
         else:
@@ -484,11 +685,24 @@ class R2GenGPT(pl.LightningModule):
         img_embeds = self.layer_norm(img_embeds)
         if self.args.vqa:
             if self.args.ours:
-                # if our method, use special wrapping where image an region are included in the prompt
-                region = samples['region']
-                region_embeds, atts_region = self.encode_img(region)
-                region_embeds = self.layer_norm(region_embeds)
-                img_embeds, atts_img = self.prompt_wrap_vqa_special1(img_embeds, atts_img, region_embeds, atts_region, samples['question'])
+                if self.args.baseline == 'complementary':
+                    dr_embeds, atts_dr = self.encode_img([image[0]])
+                    dr_embeds = self.layer_norm(dr_embeds)
+                    co_embeds, atts_co = self.encode_img([image[1]])
+                    co_embeds = self.layer_norm(co_embeds)
+                    cr_embeds, atts_cr = self.encode_img([image[2]])
+                    cr_embeds = self.layer_norm(cr_embeds)
+                    img_embeds, atts_img = getattr(self, self.args.ours_version)(dr_embeds, atts_dr, co_embeds, atts_co, cr_embeds, atts_cr, samples['question'])
+                else:
+                    # if our method, use special wrapping where image an region are included in the prompt
+                    region = samples['region']
+                    region_embeds, atts_region = self.encode_img(region)
+                    region_embeds = self.layer_norm(region_embeds)
+                    img_embeds, atts_img = getattr(self, self.args.ours_version)(img_embeds, atts_img, region_embeds, atts_region, samples['question'])
+            elif self.args.miccai2023:
+                mask = torch.stack(samples['mask'], dim=0).squeeze(2).squeeze(0).to(img_embeds.device) # size [B, 49, 1]
+                masked = img_embeds*mask
+                img_embeds, atts_img = self.prompt_wrap_vqa(masked, atts_img, samples['question']) # apply mask to image embeddings
             else:
                 img_embeds, atts_img = self.prompt_wrap_vqa(img_embeds, atts_img, samples['question'])
         else:

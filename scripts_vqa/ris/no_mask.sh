@@ -32,12 +32,12 @@ fi
     --savedmodel_path ${savepath} \
     --learning_rate 1e-4 \
     --gradient_clip_val 1 \
-    --max_length 100 \
+    --max_length 4 \
     --repetition_penalty 2.0 \
     --length_penalty -1.0 \
     --num_workers 4 \
     --devices 2 \
-    --max_epochs 30 \
+    --max_epochs 15 \
     --limit_val_batches 0.5 \
     --val_check_interval 0.5 \
     --num_sanity_val_steps 2 \
